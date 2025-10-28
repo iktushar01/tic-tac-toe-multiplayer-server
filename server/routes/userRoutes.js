@@ -45,6 +45,7 @@ router.post('/login', async (req, res) => {
         userId: user.userId,
         username: user.username,
         email: user.email,
+        photoURL: user.photoURL,
         stats: user.stats,
       }
     });
@@ -83,38 +84,107 @@ router.get('/me', authMiddleware, async (req, res) => {
 // Update user profile (requires authentication)
 router.put('/me', authMiddleware, async (req, res) => {
   try {
-    const { username, email } = req.body;
+    const { username, email, photoURL } = req.body;
     const userId = req.user.userId;
 
+    console.log('==========================================');
+    console.log('UPDATE PROFILE REQUEST RECEIVED');
+    console.log('UserId:', userId);
+    console.log('Request Body:', { username, email, photoURL });
+    
+    // Check MongoDB connection status
+    const mongoose = require('mongoose');
+    console.log('MongoDB Connection State:', mongoose.connection.readyState);
+    console.log('(0=disconnected, 1=connected, 2=connecting, 3=disconnecting)');
+    
+    if (mongoose.connection.readyState !== 1) {
+      console.error('⚠️ MongoDB is not connected! Cannot update user.');
+      return res.status(503).json({ 
+        error: 'Database connection not available',
+        details: 'MongoDB is not connected. Please ensure MongoDB is running.'
+      });
+    }
+    
+    console.log('==========================================');
+
     if (!username || !email) {
+      console.error('Validation failed: Username and email are required');
       return res.status(400).json({ error: 'Username and email are required' });
     }
 
-    const user = await User.findOne({ userId });
+    // Find user first
+    let user = await User.findOne({ userId });
 
     if (!user) {
+      console.error('User not found in database:', userId);
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Update user data
-    user.username = username;
-    user.email = email;
-    await user.save();
+    console.log('User found in database - BEFORE UPDATE:');
+    console.log('  - Username:', user.username);
+    console.log('  - Email:', user.email);
+    console.log('  - PhotoURL:', user.photoURL);
+
+    // Prepare update data
+    const updateData = {
+      username: username,
+      email: email,
+      photoURL: photoURL !== undefined ? photoURL : user.photoURL,
+      updatedAt: new Date()
+    };
+
+    console.log('Update data prepared:', updateData);
+
+    // Use findOneAndUpdate for atomic update and to ensure database persistence
+    const updatedUser = await User.findOneAndUpdate(
+      { userId },
+      { $set: updateData },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedUser) {
+      console.error('Failed to update user in database');
+      return res.status(500).json({ error: 'Failed to update user in database' });
+    }
+
+    console.log('User updated successfully in database - AFTER UPDATE:');
+    console.log('  - Username:', updatedUser.username);
+    console.log('  - Email:', updatedUser.email);
+    console.log('  - PhotoURL:', updatedUser.photoURL);
+    console.log('  - UpdatedAt:', updatedUser.updatedAt);
+
+    // Verify the update by querying again
+    const verifyUser = await User.findOne({ userId });
+    console.log('VERIFICATION - User re-fetched from database:');
+    console.log('  - Username:', verifyUser.username);
+    console.log('  - Email:', verifyUser.email);
+    console.log('  - PhotoURL:', verifyUser.photoURL);
+    console.log('==========================================');
 
     res.json({
       message: 'Profile updated successfully',
       user: {
-        userId: user.userId,
-        username: user.username,
-        email: user.email,
-        photoURL: user.photoURL,
-        stats: user.stats,
-        updatedAt: user.updatedAt,
+        userId: updatedUser.userId,
+        username: updatedUser.username,
+        email: updatedUser.email,
+        photoURL: updatedUser.photoURL,
+        stats: updatedUser.stats,
+        createdAt: updatedUser.createdAt,
+        updatedAt: updatedUser.updatedAt,
       }
     });
   } catch (error) {
-    console.error('Error updating user profile:', error);
-    res.status(500).json({ error: 'Failed to update profile' });
+    console.error('==========================================');
+    console.error('ERROR UPDATING USER PROFILE:', error);
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    console.error('==========================================');
+    res.status(500).json({ 
+      error: 'Failed to update profile', 
+      details: error.message,
+      errorType: error.name 
+    });
   }
 });
 
@@ -127,6 +197,18 @@ router.delete('/me', authMiddleware, async (req, res) => {
 
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Delete user from Firebase Auth if available
+    try {
+      const { admin } = require('../config/firebase');
+      if (admin && admin.apps.length > 0) {
+        await admin.auth().deleteUser(userId);
+        console.log('Firebase user deleted successfully');
+      }
+    } catch (firebaseError) {
+      console.error('Error deleting Firebase user:', firebaseError.message);
+      // Continue with MongoDB deletion even if Firebase deletion fails
     }
 
     // Delete user from MongoDB
@@ -208,6 +290,54 @@ router.get('/:userId/history', async (req, res) => {
   } catch (error) {
     console.error('Error fetching match history:', error);
     res.status(500).json({ error: 'Failed to fetch match history' });
+  }
+});
+
+// Test endpoint to verify database operations
+router.get('/test-db', authMiddleware, async (req, res) => {
+  try {
+    const mongoose = require('mongoose');
+    const userId = req.user.userId;
+    
+    console.log('==========================================');
+    console.log('DATABASE TEST ENDPOINT');
+    console.log('MongoDB Connection State:', mongoose.connection.readyState);
+    console.log('User ID:', userId);
+    
+    // Try to find the user
+    const user = await User.findOne({ userId });
+    
+    if (!user) {
+      return res.json({
+        status: 'error',
+        message: 'User not found in database',
+        connectionState: mongoose.connection.readyState,
+        userId: userId
+      });
+    }
+    
+    res.json({
+      status: 'success',
+      message: 'Database is working correctly',
+      connectionState: mongoose.connection.readyState,
+      user: {
+        userId: user.userId,
+        username: user.username,
+        email: user.email,
+        photoURL: user.photoURL,
+        updatedAt: user.updatedAt
+      }
+    });
+    console.log('Database test completed successfully');
+    console.log('==========================================');
+  } catch (error) {
+    console.error('Database test failed:', error);
+    console.log('==========================================');
+    res.status(500).json({
+      status: 'error',
+      message: 'Database test failed',
+      error: error.message
+    });
   }
 });
 
