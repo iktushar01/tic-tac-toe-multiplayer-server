@@ -4,6 +4,12 @@ const User = require('../models/User');
 const { verifyToken } = require('../config/firebase');
 const authMiddleware = require('../middleware/auth');
 
+// Get Socket.io instance
+let io;
+const setSocketIO = (socketIO) => {
+  io = socketIO;
+};
+
 // Firebase login endpoint - verifies Firebase token and creates/updates user
 router.post('/login', async (req, res) => {
   try {
@@ -341,5 +347,195 @@ router.get('/test-db', authMiddleware, async (req, res) => {
   }
 });
 
-module.exports = router;
+// Get all users (except current user)
+router.get('/all', authMiddleware, async (req, res) => {
+  try {
+    const currentUserId = req.user.userId;
+    
+    // Find all users except the current user
+    const users = await User.find({ userId: { $ne: currentUserId } })
+      .select('userId username email photoURL stats')
+      .sort({ username: 1 });
+
+    res.json({ users });
+  } catch (error) {
+    console.error('Error fetching all users:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+// Send friend request
+router.post('/friends/request/:userId', authMiddleware, async (req, res) => {
+  try {
+    const currentUserId = req.user.userId;
+    const targetUserId = req.params.userId;
+
+    if (currentUserId === targetUserId) {
+      return res.status(400).json({ error: 'Cannot send friend request to yourself' });
+    }
+
+    // Find both users
+    const [currentUser, targetUser] = await Promise.all([
+      User.findOne({ userId: currentUserId }),
+      User.findOne({ userId: targetUserId })
+    ]);
+
+    if (!currentUser || !targetUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if already friends
+    if (currentUser.friends.includes(targetUser._id)) {
+      return res.status(400).json({ error: 'Already friends with this user' });
+    }
+
+    // Check if friend request already exists
+    const existingRequest = targetUser.friendRequests.find(
+      req => req.from.toString() === currentUser._id.toString() && req.status === 'pending'
+    );
+
+    if (existingRequest) {
+      return res.status(400).json({ error: 'Friend request already sent' });
+    }
+
+    // Add friend request to target user
+    targetUser.friendRequests.push({
+      from: currentUser._id,
+      status: 'pending'
+    });
+
+    await targetUser.save();
+
+    // Emit Socket.io event for real-time notification
+    if (io) {
+      io.emit('friend-request-sent', {
+        fromUserId: currentUserId,
+        toUserId: targetUserId,
+        message: 'Friend request sent'
+      });
+    }
+
+    res.json({ message: 'Friend request sent successfully' });
+  } catch (error) {
+    console.error('Error sending friend request:', error);
+    res.status(500).json({ error: 'Failed to send friend request' });
+  }
+});
+
+// Respond to friend request (accept/reject)
+router.post('/friends/respond/:userId', authMiddleware, async (req, res) => {
+  try {
+    const currentUserId = req.user.userId;
+    const requesterUserId = req.params.userId;
+    const { action } = req.body; // 'accept' or 'reject'
+
+    if (!['accept', 'reject'].includes(action)) {
+      return res.status(400).json({ error: 'Invalid action. Must be "accept" or "reject"' });
+    }
+
+    // Find both users
+    const [currentUser, requesterUser] = await Promise.all([
+      User.findOne({ userId: currentUserId }),
+      User.findOne({ userId: requesterUserId })
+    ]);
+
+    if (!currentUser || !requesterUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Find the friend request
+    const friendRequest = currentUser.friendRequests.find(
+      req => req.from.toString() === requesterUser._id.toString() && req.status === 'pending'
+    );
+
+    if (!friendRequest) {
+      return res.status(404).json({ error: 'Friend request not found' });
+    }
+
+    if (action === 'accept') {
+      // Add to friends list for both users
+      if (!currentUser.friends.includes(requesterUser._id)) {
+        currentUser.friends.push(requesterUser._id);
+      }
+      if (!requesterUser.friends.includes(currentUser._id)) {
+        requesterUser.friends.push(currentUser._id);
+      }
+
+      // Update friend request status
+      friendRequest.status = 'accepted';
+    } else {
+      // Update friend request status to rejected
+      friendRequest.status = 'rejected';
+    }
+
+    await Promise.all([currentUser.save(), requesterUser.save()]);
+
+    // Emit Socket.io event for real-time notification
+    if (io) {
+      io.emit('friend-request-responded', {
+        fromUserId: requesterUserId,
+        toUserId: currentUserId,
+        action,
+        message: `Friend request ${action}ed`
+      });
+    }
+
+    res.json({ 
+      message: `Friend request ${action}ed successfully`,
+      action 
+    });
+  } catch (error) {
+    console.error('Error responding to friend request:', error);
+    res.status(500).json({ error: 'Failed to respond to friend request' });
+  }
+});
+
+// Get friends list
+router.get('/friends/list', authMiddleware, async (req, res) => {
+  try {
+    const currentUserId = req.user.userId;
+    
+    const user = await User.findOne({ userId: currentUserId })
+      .populate('friends', 'userId username email photoURL stats');
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ friends: user.friends });
+  } catch (error) {
+    console.error('Error fetching friends list:', error);
+    res.status(500).json({ error: 'Failed to fetch friends list' });
+  }
+});
+
+// Get incoming friend requests
+router.get('/friends/requests', authMiddleware, async (req, res) => {
+  try {
+    const currentUserId = req.user.userId;
+    
+    const user = await User.findOne({ userId: currentUserId })
+      .populate({
+        path: 'friendRequests.from',
+        select: 'userId username email photoURL',
+        match: { status: 'pending' }
+      });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Filter out requests that don't have a valid 'from' user (in case of deleted users)
+    const pendingRequests = user.friendRequests.filter(req => 
+      req.status === 'pending' && req.from
+    );
+
+    res.json({ requests: pendingRequests });
+  } catch (error) {
+    console.error('Error fetching friend requests:', error);
+    res.status(500).json({ error: 'Failed to fetch friend requests' });
+  }
+});
+
+module.exports = { router, setSocketIO };
 

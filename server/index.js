@@ -10,7 +10,7 @@ const { Server } = require('socket.io');
 const connectDB = require('./config/database');
 const { initializeFirebase } = require('./config/firebase');
 const gameRoutes = require('./routes/gameRoutes');
-const userRoutes = require('./routes/userRoutes');
+const { router: userRoutes, setSocketIO } = require('./routes/userRoutes');
 const { handleSocketConnection } = require('./socket/socketHandler');
 
 // Initialize Express app
@@ -45,6 +45,9 @@ app.get('/', (req, res) => {
 
 app.use('/api/games', gameRoutes);
 app.use('/api/users', userRoutes);
+
+// Set Socket.io instance for user routes
+setSocketIO(io);
 
 // Socket.io connection handling
 io.on('connection', (socket) => {

@@ -3,8 +3,65 @@ const User = require('../models/User');
 
 // Store active connections
 const activeConnections = new Map(); // socketId -> { roomCode, userId }
+const userSockets = new Map(); // userId -> socketId
 
 const handleSocketConnection = (socket, io) => {
+  
+  // Handle user authentication and friend system setup
+  socket.on('authenticate', ({ userId }) => {
+    if (userId) {
+      userSockets.set(userId, socket.id);
+      socket.userId = userId;
+      console.log(`User ${userId} authenticated with socket ${socket.id}`);
+    }
+  });
+
+  // Handle friend request notifications
+  socket.on('send-friend-request', async ({ fromUserId, toUserId }) => {
+    try {
+      const targetSocketId = userSockets.get(toUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('friend-request-received', {
+          fromUserId,
+          message: 'You have received a new friend request!'
+        });
+      }
+    } catch (error) {
+      console.error('Error sending friend request notification:', error);
+    }
+  });
+
+  // Handle friend request response notifications
+  socket.on('friend-request-responded', async ({ fromUserId, toUserId, action }) => {
+    try {
+      const targetSocketId = userSockets.get(toUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('friend-request-response', {
+          fromUserId,
+          action,
+          message: `Your friend request was ${action}ed!`
+        });
+      }
+    } catch (error) {
+      console.error('Error sending friend request response notification:', error);
+    }
+  });
+
+  // Handle game challenge notifications
+  socket.on('challenge-friend', async ({ fromUserId, toUserId, gameId }) => {
+    try {
+      const targetSocketId = userSockets.get(toUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('game-challenge', {
+          fromUserId,
+          gameId,
+          message: 'You have been challenged to a game!'
+        });
+      }
+    } catch (error) {
+      console.error('Error sending game challenge notification:', error);
+    }
+  });
   
   // Handle join room
   socket.on('join-room', async ({ roomCode, userId, username }) => {
@@ -146,6 +203,12 @@ const handleSocketConnection = (socket, io) => {
         }
         
         activeConnections.delete(socket.id);
+      }
+
+      // Clean up user socket mapping
+      if (socket.userId) {
+        userSockets.delete(socket.userId);
+        console.log(`User ${socket.userId} disconnected`);
       }
     } catch (error) {
       console.error('Error handling disconnect:', error);
