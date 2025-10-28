@@ -9,6 +9,8 @@ A Node.js server for multiplayer Tic-Tac-Toe game with Socket.io for real-time g
 - 🔒 REST API for game management
 - 📊 User statistics tracking
 - 🏆 Match history
+- 🔐 Firebase Authentication integration
+- 👤 User session management
 
 ## Tech Stack
 
@@ -16,6 +18,7 @@ A Node.js server for multiplayer Tic-Tac-Toe game with Socket.io for real-time g
 - **Socket.io** - Real-time bidirectional communication
 - **MongoDB** - Database
 - **Mongoose** - MongoDB object modeling
+- **Firebase Admin** - Firebase authentication verification
 - **CORS** - Cross-origin resource sharing
 - **Morgan** - HTTP request logger
 
@@ -23,6 +26,7 @@ A Node.js server for multiplayer Tic-Tac-Toe game with Socket.io for real-time g
 
 - Node.js (v14 or higher)
 - MongoDB (local or cloud instance)
+- Firebase project with Authentication enabled
 - npm or yarn
 
 ## Installation
@@ -32,7 +36,14 @@ A Node.js server for multiplayer Tic-Tac-Toe game with Socket.io for real-time g
 npm install
 ```
 
-2. Set up environment variables:
+2. Set up Firebase Admin:
+   - Go to [Firebase Console](https://console.firebase.google.com/)
+   - Select your project
+   - Go to Project Settings → Service Accounts
+   - Click "Generate New Private Key"
+   - Save the JSON file and copy the values to your `.env` file
+
+3. Set up environment variables:
 Create a `.env` file in the root directory with the following:
 
 ```env
@@ -40,9 +51,16 @@ PORT=3000
 MONGODB_URI=mongodb://localhost:27017/tic-tac-toe
 CLIENT_URL=http://localhost:5173
 NODE_ENV=development
+
+# Firebase Configuration (from Service Account JSON)
+FIREBASE_PROJECT_ID=your-project-id
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYOUR_PRIVATE_KEY\n-----END PRIVATE KEY-----\n"
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk@your-project.iam.gserviceaccount.com
 ```
 
-3. Start MongoDB:
+**Important:** The `FIREBASE_PRIVATE_KEY` should include the actual private key from your Firebase service account JSON file. Make sure to preserve the `\n` characters in the key.
+
+4. Start MongoDB:
 Make sure MongoDB is running on your system. For local installation:
 ```bash
 mongod
@@ -82,7 +100,24 @@ The server will start on `http://localhost:3000`
 
 ### Users
 
-- `POST /api/users` - Create or get user
+- `POST /api/users/login` - Firebase authentication
+  - Body: `{ idToken }` (Firebase ID token)
+  - Returns: User object with stats
+
+- `GET /api/users/me` - Get current authenticated user (requires Bearer token)
+  - Headers: `Authorization: Bearer <token>`
+  - Returns: User object with stats and timestamps
+
+- `PUT /api/users/me` - Update user profile (requires Bearer token)
+  - Headers: `Authorization: Bearer <token>`
+  - Body: `{ username: string, email: string }`
+  - Returns: Updated user object
+
+- `DELETE /api/users/me` - Delete user account (requires Bearer token)
+  - Headers: `Authorization: Bearer <token>`
+  - Returns: Confirmation message
+
+- `POST /api/users` - Create or get user (legacy endpoint)
   - Body: `{ userId, username, email }`
 
 - `GET /api/users/:userId/stats` - Get user statistics
@@ -114,7 +149,10 @@ Tic-Tac-Toe-Server/
 ├── server/
 │   ├── index.js           # Main server entry point
 │   ├── config/
-│   │   └── database.js    # MongoDB connection
+│   │   ├── database.js    # MongoDB connection
+│   │   └── firebase.js    # Firebase Admin configuration
+│   ├── middleware/
+│   │   └── auth.js        # Firebase authentication middleware
 │   ├── models/
 │   │   ├── Game.js        # Game model
 │   │   └── User.js        # User model
@@ -128,6 +166,14 @@ Tic-Tac-Toe-Server/
 └── README.md
 ```
 
+## Authentication Flow
+
+1. User logs in with Firebase (email/password or Google)
+2. Client sends Firebase ID token to `/api/users/login`
+3. Server verifies token and creates/updates user in MongoDB
+4. Server returns user data including stats
+5. All subsequent requests include Bearer token in Authorization header
+
 ## Game Rules
 
 - Players alternate turns (X goes first)
@@ -139,6 +185,18 @@ Tic-Tac-Toe-Server/
 ## Development
 
 The server uses nodemon for auto-reloading during development.
+
+## Troubleshooting
+
+### Firebase Authentication Issues
+- Ensure `FIREBASE_PRIVATE_KEY` includes the full key with `\n` newline characters
+- Check that your Firebase project has Authentication enabled
+- Verify the service account email matches your `.env` configuration
+
+### MongoDB Connection Issues
+- Check that MongoDB is running
+- Verify the connection string in `.env`
+- For MongoDB Atlas, ensure your IP is whitelisted
 
 ## License
 

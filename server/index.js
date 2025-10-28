@@ -8,6 +8,7 @@ const mongoose = require('mongoose');
 const { Server } = require('socket.io');
 
 const connectDB = require('./config/database');
+const { initializeFirebase } = require('./config/firebase');
 const gameRoutes = require('./routes/gameRoutes');
 const userRoutes = require('./routes/userRoutes');
 const { handleSocketConnection } = require('./socket/socketHandler');
@@ -18,12 +19,15 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: process.env.CLIENT_URL || "http://localhost:5173",
-    methods: ["GET", "POST"]
+    methods: ["GET", "POST", "PUT", "DELETE"]
   }
 });
 
 // Connect to MongoDB
 connectDB();
+
+// Initialize Firebase Admin
+initializeFirebase();
 
 // Middleware
 app.use(cors({
