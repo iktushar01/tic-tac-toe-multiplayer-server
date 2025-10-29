@@ -48,24 +48,16 @@ const userSchema = new mongoose.Schema({
     moves: Number
   }],
   friends: [{
-    type: mongoose.Schema.Types.ObjectId,
+    type: String,
     ref: 'User'
   }],
-  friendRequests: [{
-    from: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: true
-    },
-    status: {
-      type: String,
-      enum: ['pending', 'accepted', 'rejected'],
-      default: 'pending'
-    },
-    createdAt: {
-      type: Date,
-      default: Date.now
-    }
+  sentRequests: [{
+    type: String,
+    ref: 'User'
+  }],
+  receivedRequests: [{
+    type: String,
+    ref: 'User'
   }],
   createdAt: {
     type: Date,

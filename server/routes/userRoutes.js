@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
+const ComputerGame = require('../models/ComputerGame');
 const { verifyToken } = require('../config/firebase');
 const authMiddleware = require('../middleware/auth');
 
@@ -367,8 +368,8 @@ router.get('/all', authMiddleware, async (req, res) => {
 // Send friend request
 router.post('/friends/request/:userId', authMiddleware, async (req, res) => {
   try {
-    const currentUserId = req.user.userId;
-    const targetUserId = req.params.userId;
+    const currentUserId = req.user.userId; // A
+    const targetUserId = req.params.userId; // B
 
     if (currentUserId === targetUserId) {
       return res.status(400).json({ error: 'Cannot send friend request to yourself' });
@@ -385,26 +386,26 @@ router.post('/friends/request/:userId', authMiddleware, async (req, res) => {
     }
 
     // Check if already friends
-    if (currentUser.friends.includes(targetUser._id)) {
+    if (currentUser.friends.includes(targetUserId)) {
       return res.status(400).json({ error: 'Already friends with this user' });
     }
 
-    // Check if friend request already exists
-    const existingRequest = targetUser.friendRequests.find(
-      req => req.from.toString() === currentUser._id.toString() && req.status === 'pending'
-    );
-
-    if (existingRequest) {
+    // Check if request already exists (either direction)
+    if (currentUser.sentRequests.includes(targetUserId)) {
       return res.status(400).json({ error: 'Friend request already sent' });
     }
 
-    // Add friend request to target user
-    targetUser.friendRequests.push({
-      from: currentUser._id,
-      status: 'pending'
-    });
+    if (currentUser.receivedRequests.includes(targetUserId)) {
+      return res.status(400).json({ error: 'This user has already sent you a friend request' });
+    }
 
-    await targetUser.save();
+    // Add B's ID to A's sentRequests
+    currentUser.sentRequests.push(targetUserId);
+    
+    // Add A's ID to B's receivedRequests
+    targetUser.receivedRequests.push(currentUserId);
+
+    await Promise.all([currentUser.save(), targetUser.save()]);
 
     // Emit Socket.io event for real-time notification
     if (io) {
@@ -422,16 +423,11 @@ router.post('/friends/request/:userId', authMiddleware, async (req, res) => {
   }
 });
 
-// Respond to friend request (accept/reject)
-router.post('/friends/respond/:userId', authMiddleware, async (req, res) => {
+// Accept friend request
+router.post('/friends/accept/:userId', authMiddleware, async (req, res) => {
   try {
-    const currentUserId = req.user.userId;
-    const requesterUserId = req.params.userId;
-    const { action } = req.body; // 'accept' or 'reject'
-
-    if (!['accept', 'reject'].includes(action)) {
-      return res.status(400).json({ error: 'Invalid action. Must be "accept" or "reject"' });
-    }
+    const currentUserId = req.user.userId; // B (receiver)
+    const requesterUserId = req.params.userId; // A (sender)
 
     // Find both users
     const [currentUser, requesterUser] = await Promise.all([
@@ -443,50 +439,149 @@ router.post('/friends/respond/:userId', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Find the friend request
-    const friendRequest = currentUser.friendRequests.find(
-      req => req.from.toString() === requesterUser._id.toString() && req.status === 'pending'
-    );
-
-    if (!friendRequest) {
+    // Check if request exists
+    if (!currentUser.receivedRequests.includes(requesterUserId)) {
       return res.status(404).json({ error: 'Friend request not found' });
     }
 
-    if (action === 'accept') {
-      // Add to friends list for both users
-      if (!currentUser.friends.includes(requesterUser._id)) {
-        currentUser.friends.push(requesterUser._id);
-      }
-      if (!requesterUser.friends.includes(currentUser._id)) {
-        requesterUser.friends.push(currentUser._id);
-      }
+    // Remove from sentRequests and receivedRequests
+    currentUser.receivedRequests = currentUser.receivedRequests.filter(id => id !== requesterUserId);
+    requesterUser.sentRequests = requesterUser.sentRequests.filter(id => id !== currentUserId);
 
-      // Update friend request status
-      friendRequest.status = 'accepted';
-    } else {
-      // Update friend request status to rejected
-      friendRequest.status = 'rejected';
+    // Add to friends lists
+    if (!currentUser.friends.includes(requesterUserId)) {
+      currentUser.friends.push(requesterUserId);
+    }
+    if (!requesterUser.friends.includes(currentUserId)) {
+      requesterUser.friends.push(currentUserId);
     }
 
     await Promise.all([currentUser.save(), requesterUser.save()]);
 
     // Emit Socket.io event for real-time notification
     if (io) {
-      io.emit('friend-request-responded', {
+      io.emit('friend-request-accepted', {
         fromUserId: requesterUserId,
         toUserId: currentUserId,
-        action,
-        message: `Friend request ${action}ed`
+        message: 'Friend request accepted'
       });
     }
 
-    res.json({ 
-      message: `Friend request ${action}ed successfully`,
-      action 
-    });
+    res.json({ message: 'Friend request accepted successfully' });
   } catch (error) {
-    console.error('Error responding to friend request:', error);
-    res.status(500).json({ error: 'Failed to respond to friend request' });
+    console.error('Error accepting friend request:', error);
+    res.status(500).json({ error: 'Failed to accept friend request' });
+  }
+});
+
+// Reject friend request
+router.post('/friends/reject/:userId', authMiddleware, async (req, res) => {
+  try {
+    const currentUserId = req.user.userId; // B (receiver)
+    const requesterUserId = req.params.userId; // A (sender)
+
+    // Find both users
+    const [currentUser, requesterUser] = await Promise.all([
+      User.findOne({ userId: currentUserId }),
+      User.findOne({ userId: requesterUserId })
+    ]);
+
+    if (!currentUser || !requesterUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if request exists
+    if (!currentUser.receivedRequests.includes(requesterUserId)) {
+      return res.status(404).json({ error: 'Friend request not found' });
+    }
+
+    // Remove from sentRequests and receivedRequests
+    currentUser.receivedRequests = currentUser.receivedRequests.filter(id => id !== requesterUserId);
+    requesterUser.sentRequests = requesterUser.sentRequests.filter(id => id !== currentUserId);
+
+    await Promise.all([currentUser.save(), requesterUser.save()]);
+
+    // Emit Socket.io event for real-time notification
+    if (io) {
+      io.emit('friend-request-rejected', {
+        fromUserId: requesterUserId,
+        toUserId: currentUserId,
+        message: 'Friend request rejected'
+      });
+    }
+
+    res.json({ message: 'Friend request rejected successfully' });
+  } catch (error) {
+    console.error('Error rejecting friend request:', error);
+    res.status(500).json({ error: 'Failed to reject friend request' });
+  }
+});
+
+// Cancel sent friend request
+router.post('/friends/cancel/:userId', authMiddleware, async (req, res) => {
+  try {
+    const currentUserId = req.user.userId; // A (sender)
+    const targetUserId = req.params.userId; // B (receiver)
+
+    // Find both users
+    const [currentUser, targetUser] = await Promise.all([
+      User.findOne({ userId: currentUserId }),
+      User.findOne({ userId: targetUserId })
+    ]);
+
+    if (!currentUser || !targetUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if request exists
+    if (!currentUser.sentRequests.includes(targetUserId)) {
+      return res.status(404).json({ error: 'Friend request not found' });
+    }
+
+    // Remove from sentRequests and receivedRequests
+    currentUser.sentRequests = currentUser.sentRequests.filter(id => id !== targetUserId);
+    targetUser.receivedRequests = targetUser.receivedRequests.filter(id => id !== currentUserId);
+
+    await Promise.all([currentUser.save(), targetUser.save()]);
+
+    res.json({ message: 'Friend request cancelled successfully' });
+  } catch (error) {
+    console.error('Error cancelling friend request:', error);
+    res.status(500).json({ error: 'Failed to cancel friend request' });
+  }
+});
+
+// Unfriend
+router.post('/friends/unfriend/:userId', authMiddleware, async (req, res) => {
+  try {
+    const currentUserId = req.user.userId; // A
+    const friendUserId = req.params.userId; // B
+
+    // Find both users
+    const [currentUser, friendUser] = await Promise.all([
+      User.findOne({ userId: currentUserId }),
+      User.findOne({ userId: friendUserId })
+    ]);
+
+    if (!currentUser || !friendUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if they are friends
+    if (!currentUser.friends.includes(friendUserId)) {
+      return res.status(400).json({ error: 'Not friends with this user' });
+    }
+
+    // Remove from both friends lists
+    currentUser.friends = currentUser.friends.filter(id => id !== friendUserId);
+    friendUser.friends = friendUser.friends.filter(id => id !== currentUserId);
+
+    await Promise.all([currentUser.save(), friendUser.save()]);
+
+    res.json({ message: 'Friend removed successfully' });
+  } catch (error) {
+    console.error('Error unfriending:', error);
+    res.status(500).json({ error: 'Failed to unfriend' });
   }
 });
 
@@ -495,47 +590,436 @@ router.get('/friends/list', authMiddleware, async (req, res) => {
   try {
     const currentUserId = req.user.userId;
     
-    const user = await User.findOne({ userId: currentUserId })
-      .populate('friends', 'userId username email photoURL stats');
+    const user = await User.findOne({ userId: currentUserId });
 
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.json({ friends: user.friends });
+    // Get full user details for each friend
+    const friends = await User.find({ userId: { $in: user.friends } })
+      .select('userId username email photoURL stats');
+
+    res.json({ friends });
   } catch (error) {
     console.error('Error fetching friends list:', error);
     res.status(500).json({ error: 'Failed to fetch friends list' });
   }
 });
 
-// Get incoming friend requests
-router.get('/friends/requests', authMiddleware, async (req, res) => {
+// Get received friend requests
+router.get('/friends/requests/received', authMiddleware, async (req, res) => {
   try {
     const currentUserId = req.user.userId;
     
-    const user = await User.findOne({ userId: currentUserId })
-      .populate({
-        path: 'friendRequests.from',
-        select: 'userId username email photoURL',
-        match: { status: 'pending' }
-      });
+    const user = await User.findOne({ userId: currentUserId });
 
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Filter out requests that don't have a valid 'from' user (in case of deleted users)
-    const pendingRequests = user.friendRequests.filter(req => 
-      req.status === 'pending' && req.from
-    );
+    // Get full user details for each requester
+    const requests = await User.find({ userId: { $in: user.receivedRequests } })
+      .select('userId username email photoURL stats');
 
-    res.json({ requests: pendingRequests });
+    res.json({ requests });
   } catch (error) {
-    console.error('Error fetching friend requests:', error);
+    console.error('Error fetching received friend requests:', error);
     res.status(500).json({ error: 'Failed to fetch friend requests' });
   }
 });
 
+// Get sent friend requests
+router.get('/friends/requests/sent', authMiddleware, async (req, res) => {
+  try {
+    const currentUserId = req.user.userId;
+    
+    const user = await User.findOne({ userId: currentUserId });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Get full user details for each user we sent request to
+    const requests = await User.find({ userId: { $in: user.sentRequests } })
+      .select('userId username email photoURL stats');
+
+    res.json({ requests });
+  } catch (error) {
+    console.error('Error fetching sent friend requests:', error);
+    res.status(500).json({ error: 'Failed to fetch sent requests' });
+  }
+});
+
+// Create new computer game
+router.post('/computer-game/create', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { boardSize, aiDifficulty, playerSymbol = 'X' } = req.body;
+
+    // Validate input
+    if (!boardSize || !aiDifficulty) {
+      return res.status(400).json({ error: 'Board size and AI difficulty are required' });
+    }
+
+    if (![3, 4, 5, 6].includes(boardSize)) {
+      return res.status(400).json({ error: 'Board size must be 3, 4, 5, or 6' });
+    }
+
+    if (!['easy', 'medium', 'hard'].includes(aiDifficulty)) {
+      return res.status(400).json({ error: 'AI difficulty must be easy, medium, or hard' });
+    }
+
+    const user = await User.findOne({ userId });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Create new computer game
+    const gameId = ComputerGame.generateGameId();
+    const board = Array(boardSize * boardSize).fill(null);
+    
+    const computerGame = new ComputerGame({
+      gameId,
+      userId,
+      username: user.username,
+      boardSize,
+      aiDifficulty,
+      playerSymbol,
+      aiSymbol: playerSymbol === 'X' ? 'O' : 'X',
+      board,
+      status: 'playing'
+    });
+
+    await computerGame.save();
+
+    res.json({
+      message: 'Computer game created successfully',
+      gameId,
+      game: computerGame.getGameSummary()
+    });
+  } catch (error) {
+    console.error('Error creating computer game:', error);
+    res.status(500).json({ error: 'Failed to create computer game' });
+  }
+});
+
+// Make move in computer game
+router.post('/computer-game/move', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { gameId, index, player } = req.body;
+
+    if (!gameId || index === undefined || !player) {
+      return res.status(400).json({ error: 'Game ID, index, and player are required' });
+    }
+
+    const game = await ComputerGame.findOne({ gameId, userId });
+    if (!game) {
+      return res.status(404).json({ error: 'Game not found' });
+    }
+
+    if (game.status !== 'playing') {
+      return res.status(400).json({ error: 'Game is not active' });
+    }
+
+    // Validate move
+    if (game.board[index] !== null) {
+      return res.status(400).json({ error: 'Invalid move - cell is already occupied' });
+    }
+
+    // Make the move
+    game.board[index] = player;
+    game.totalMoves++;
+    game.moves.push({
+      index,
+      player,
+      timestamp: new Date()
+    });
+
+    await game.save();
+
+    res.json({
+      message: 'Move made successfully',
+      board: game.board,
+      totalMoves: game.totalMoves
+    });
+  } catch (error) {
+    console.error('Error making move:', error);
+    res.status(500).json({ error: 'Failed to make move' });
+  }
+});
+
+// Complete computer game
+router.post('/computer-game/complete', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { gameId, result, winner, finalBoard } = req.body;
+
+    if (!gameId || !result) {
+      return res.status(400).json({ error: 'Game ID and result are required' });
+    }
+
+    if (!['win', 'loss', 'draw'].includes(result)) {
+      return res.status(400).json({ error: 'Invalid result. Must be win, loss, or draw' });
+    }
+
+    const game = await ComputerGame.findOne({ gameId, userId });
+    if (!game) {
+      return res.status(404).json({ error: 'Game not found' });
+    }
+
+    if (game.status !== 'playing') {
+      return res.status(400).json({ error: 'Game is already completed' });
+    }
+
+    // Update game with final result
+    game.status = 'completed';
+    game.result = result;
+    game.winner = winner || (result === 'draw' ? 'draw' : null);
+    game.completedAt = new Date();
+    game.calculateDuration();
+
+    if (finalBoard) {
+      game.board = finalBoard;
+    }
+
+    await game.save();
+
+    // Update user stats
+    const user = await User.findOne({ userId });
+    if (user) {
+      const updateData = {
+        $inc: {
+          'stats.totalGames': 1
+        },
+        $push: {
+          matches: {
+            gameId: gameId,
+            opponent: 'Computer',
+            result: result,
+            date: game.completedAt,
+            moves: game.totalMoves,
+            gameMode: 'computer',
+            boardSize: game.boardSize,
+            aiDifficulty: game.aiDifficulty
+          }
+        }
+      };
+
+      // Increment appropriate stat
+      if (result === 'win') {
+        updateData.$inc['stats.wins'] = 1;
+      } else if (result === 'loss') {
+        updateData.$inc['stats.losses'] = 1;
+      } else if (result === 'draw') {
+        updateData.$inc['stats.draws'] = 1;
+      }
+
+      await User.findOneAndUpdate({ userId }, updateData);
+    }
+
+    res.json({
+      message: 'Game completed successfully',
+      game: game.getGameSummary(),
+      stats: {
+        wins: user.stats.wins + (result === 'win' ? 1 : 0),
+        losses: user.stats.losses + (result === 'loss' ? 1 : 0),
+        draws: user.stats.draws + (result === 'draw' ? 1 : 0),
+        totalGames: user.stats.totalGames + 1
+      }
+    });
+  } catch (error) {
+    console.error('Error completing game:', error);
+    res.status(500).json({ error: 'Failed to complete game' });
+  }
+});
+
+// Get computer game history
+router.get('/computer-games', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { page = 1, limit = 20, status } = req.query;
+
+    const query = { userId };
+    if (status) {
+      query.status = status;
+    }
+
+    const games = await ComputerGame.find(query)
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit)
+      .select('gameId boardSize aiDifficulty result totalMoves gameDuration createdAt completedAt status');
+
+    const totalGames = await ComputerGame.countDocuments(query);
+
+    res.json({
+      games: games.map(game => game.getGameSummary()),
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(totalGames / limit),
+        totalGames,
+        hasNext: page * limit < totalGames,
+        hasPrev: page > 1
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching computer games:', error);
+    res.status(500).json({ error: 'Failed to fetch computer games' });
+  }
+});
+
+// Get specific computer game details
+router.get('/computer-game/:gameId', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { gameId } = req.params;
+
+    const game = await ComputerGame.findOne({ gameId, userId });
+    if (!game) {
+      return res.status(404).json({ error: 'Game not found' });
+    }
+
+    res.json({
+      game: {
+        ...game.getGameSummary(),
+        board: game.board,
+        moves: game.moves,
+        playerSymbol: game.playerSymbol,
+        aiSymbol: game.aiSymbol
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching game details:', error);
+    res.status(500).json({ error: 'Failed to fetch game details' });
+  }
+});
+
+// Save game result (for computer games) - Legacy endpoint for backward compatibility
+router.post('/game/result', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { result, opponent, moves, gameMode } = req.body;
+
+    if (!['win', 'loss', 'draw'].includes(result)) {
+      return res.status(400).json({ error: 'Invalid result. Must be win, loss, or draw' });
+    }
+
+    const user = await User.findOne({ userId });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Update stats
+    const updateData = {
+      $inc: {
+        'stats.totalGames': 1
+      },
+      $push: {
+        matches: {
+          opponent: opponent || 'Computer',
+          result: result,
+          date: Date.now(),
+          moves: moves || 0,
+          gameMode: gameMode || 'computer'
+        }
+      }
+    };
+
+    // Increment appropriate stat
+    if (result === 'win') {
+      updateData.$inc['stats.wins'] = 1;
+    } else if (result === 'loss') {
+      updateData.$inc['stats.losses'] = 1;
+    } else if (result === 'draw') {
+      updateData.$inc['stats.draws'] = 1;
+    }
+
+    await User.findOneAndUpdate({ userId }, updateData);
+
+    res.json({ 
+      message: 'Game result saved successfully',
+      stats: {
+        wins: user.stats.wins + (result === 'win' ? 1 : 0),
+        losses: user.stats.losses + (result === 'loss' ? 1 : 0),
+        draws: user.stats.draws + (result === 'draw' ? 1 : 0),
+        totalGames: user.stats.totalGames + 1
+      }
+    });
+  } catch (error) {
+    console.error('Error saving game result:', error);
+    res.status(500).json({ error: 'Failed to save game result' });
+  }
+});
+
+// Get leaderboard
+router.get('/leaderboard', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 50;
+    const sortBy = req.query.sortBy || 'wins'; // wins, winRate, totalGames
+
+    let sortCriteria = {};
+    if (sortBy === 'wins') {
+      sortCriteria = { 'stats.wins': -1 };
+    } else if (sortBy === 'winRate') {
+      sortCriteria = { 'stats.wins': -1 }; // Will calculate win rate client-side
+    } else if (sortBy === 'totalGames') {
+      sortCriteria = { 'stats.totalGames': -1 };
+    }
+
+    const users = await User.find({ 'stats.totalGames': { $gt: 0 } })
+      .select('userId username photoURL stats')
+      .sort(sortCriteria)
+      .limit(limit);
+
+    // Calculate win rate and add rank
+    const leaderboard = users.map((user, index) => {
+      const winRate = user.stats.totalGames > 0 
+        ? Math.round((user.stats.wins / user.stats.totalGames) * 100) 
+        : 0;
+      
+      return {
+        rank: index + 1,
+        userId: user.userId,
+        username: user.username,
+        photoURL: user.photoURL,
+        stats: {
+          wins: user.stats.wins,
+          losses: user.stats.losses,
+          draws: user.stats.draws,
+          totalGames: user.stats.totalGames,
+          winRate: winRate
+        }
+      };
+    });
+
+    // If sorting by win rate, re-sort the array
+    if (sortBy === 'winRate') {
+      leaderboard.sort((a, b) => {
+        if (b.stats.winRate !== a.stats.winRate) {
+          return b.stats.winRate - a.stats.winRate;
+        }
+        return b.stats.wins - a.stats.wins; // Tie-breaker by total wins
+      });
+      
+      // Update ranks after sorting
+      leaderboard.forEach((entry, index) => {
+        entry.rank = index + 1;
+      });
+    }
+
+    res.json({
+      leaderboard,
+      total: leaderboard.length,
+      sortBy
+    });
+  } catch (error) {
+    console.error('Error fetching leaderboard:', error);
+    res.status(500).json({ error: 'Failed to fetch leaderboard' });
+  }
+});
+
 module.exports = { router, setSocketIO };
+
 
