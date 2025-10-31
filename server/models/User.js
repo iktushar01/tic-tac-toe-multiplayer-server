@@ -19,6 +19,44 @@ const userSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  coins: {
+    type: Number,
+    default: 5000 // Initial coin balance
+  },
+  coinStats: {
+    totalBet: {
+      type: Number,
+      default: 0
+    },
+    totalWinnings: {
+      type: Number,
+      default: 0
+    },
+    totalLosses: {
+      type: Number,
+      default: 0
+    },
+    highestWin: {
+      type: Number,
+      default: 0
+    },
+    gamesPlayed: {
+      type: Number,
+      default: 0
+    },
+    dailyClaimsStreak: {
+      type: Number,
+      default: 0
+    },
+    totalDailyClaims: {
+      type: Number,
+      default: 0
+    }
+  },
+  lastDailyClaimDate: {
+    type: Date,
+    default: null
+  },
   stats: {
     wins: {
       type: Number,

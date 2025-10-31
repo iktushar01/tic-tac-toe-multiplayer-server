@@ -54,6 +54,8 @@ router.post('/login', async (req, res) => {
         email: user.email,
         photoURL: user.photoURL,
         stats: user.stats,
+        coins: user.coins,
+        coinStats: user.coinStats,
       }
     });
   } catch (error) {
@@ -78,6 +80,8 @@ router.get('/me', authMiddleware, async (req, res) => {
         email: user.email,
         photoURL: user.photoURL,
         stats: user.stats,
+        coins: user.coins,
+        coinStats: user.coinStats,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt,
       }
@@ -176,6 +180,8 @@ router.put('/me', authMiddleware, async (req, res) => {
         email: updatedUser.email,
         photoURL: updatedUser.photoURL,
         stats: updatedUser.stats,
+        coins: updatedUser.coins,
+        coinStats: updatedUser.coinStats,
         createdAt: updatedUser.createdAt,
         updatedAt: updatedUser.updatedAt,
       }
@@ -952,6 +958,409 @@ router.post('/game/result', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Failed to save game result' });
   }
 });
+
+// ==================== COIN BETTING SYSTEM ====================
+
+// Get coin balance
+router.get('/coins/balance', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const user = await User.findOne({ userId });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({
+      balance: user.coins,
+      coinStats: user.coinStats
+    });
+  } catch (error) {
+    console.error('Error fetching coin balance:', error);
+    res.status(500).json({ error: 'Failed to fetch coin balance' });
+  }
+});
+
+// Place bet (lock coins before game starts)
+router.post('/coins/bet/place', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { betAmount, gameId } = req.body;
+
+    if (!betAmount || betAmount <= 0) {
+      return res.status(400).json({ error: 'Invalid bet amount' });
+    }
+
+    const user = await User.findOne({ userId });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Validate bet amount
+    if (betAmount < 100) {
+      return res.status(400).json({ error: 'Minimum bet is 100 coins' });
+    }
+
+    if (betAmount > 5000) {
+      return res.status(400).json({ error: 'Maximum bet is 5000 coins' });
+    }
+
+    if (user.coins < betAmount) {
+      return res.status(400).json({ 
+        error: `Not enough coins. You need ${betAmount} coins but only have ${user.coins}.`,
+        balance: user.coins
+      });
+    }
+
+    // Bet is validated, return success
+    res.json({
+      success: true,
+      message: 'Bet placed successfully',
+      betAmount,
+      balance: user.coins,
+      gameId
+    });
+  } catch (error) {
+    console.error('Error placing bet:', error);
+    res.status(500).json({ error: 'Failed to place bet' });
+  }
+});
+
+// Process game result with betting
+router.post('/coins/bet/complete', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { betAmount, result, gameId } = req.body;
+
+    if (!betAmount || !result) {
+      return res.status(400).json({ error: 'Bet amount and result are required' });
+    }
+
+    if (!['win', 'loss', 'draw'].includes(result)) {
+      return res.status(400).json({ error: 'Invalid result. Must be win, loss, or draw' });
+    }
+
+    const user = await User.findOne({ userId });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Calculate coin change based on result
+    let coinChange = 0;
+    let profit = 0;
+    let message = '';
+
+    switch (result) {
+      case 'win':
+        // Win: Get bet back + 100% profit (double the bet)
+        profit = betAmount;
+        coinChange = betAmount + profit; // Total: +betAmount + profit
+        message = `🏆 You won! +${coinChange} coins (bet: ${betAmount}, profit: ${profit})`;
+        break;
+      
+      case 'draw':
+        // Draw: Get 50% of bet back
+        profit = Math.floor(betAmount * 0.5);
+        coinChange = profit - betAmount; // Net change is negative but get some back
+        message = `🤝 Draw! ${coinChange} coins (50% refund: ${profit})`;
+        break;
+      
+      case 'loss':
+        // Loss: Lose entire bet
+        profit = 0;
+        coinChange = -betAmount;
+        message = `💀 You lost! ${coinChange} coins`;
+        break;
+    }
+
+    // Update user's coins
+    const newBalance = user.coins + coinChange;
+    
+    // Update coin stats
+    const updateData = {
+      coins: newBalance,
+      $inc: {
+        'coinStats.totalBet': betAmount,
+        'coinStats.gamesPlayed': 1
+      }
+    };
+
+    if (result === 'win') {
+      updateData.$inc['coinStats.totalWinnings'] = profit;
+      // Update highest win if applicable
+      if (profit > user.coinStats.highestWin) {
+        updateData['coinStats.highestWin'] = profit;
+      }
+    } else if (result === 'loss') {
+      updateData.$inc['coinStats.totalLosses'] = betAmount;
+    }
+
+    const updatedUser = await User.findOneAndUpdate(
+      { userId },
+      updateData,
+      { new: true }
+    );
+
+    res.json({
+      success: true,
+      message,
+      transaction: {
+        betAmount,
+        result,
+        coinChange,
+        profit,
+        balanceBefore: user.coins,
+        balanceAfter: newBalance,
+        timestamp: new Date().toISOString()
+      },
+      balance: newBalance,
+      coinStats: updatedUser.coinStats
+    });
+  } catch (error) {
+    console.error('Error completing bet:', error);
+    res.status(500).json({ error: 'Failed to complete bet' });
+  }
+});
+
+// Add coins (admin/reward function)
+router.post('/coins/add', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { amount, reason = 'reward' } = req.body;
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
+
+    const user = await User.findOne({ userId });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const newBalance = user.coins + amount;
+    user.coins = newBalance;
+    await user.save();
+
+    res.json({
+      success: true,
+      message: `Added ${amount} coins (${reason})`,
+      balance: newBalance,
+      amountAdded: amount
+    });
+  } catch (error) {
+    console.error('Error adding coins:', error);
+    res.status(500).json({ error: 'Failed to add coins' });
+  }
+});
+
+// Deduct coins (admin function)
+router.post('/coins/deduct', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { amount, reason = 'deduction' } = req.body;
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
+
+    const user = await User.findOne({ userId });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (user.coins < amount) {
+      return res.status(400).json({ 
+        error: 'Insufficient coins',
+        balance: user.coins
+      });
+    }
+
+    const newBalance = user.coins - amount;
+    user.coins = newBalance;
+    await user.save();
+
+    res.json({
+      success: true,
+      message: `Deducted ${amount} coins (${reason})`,
+      balance: newBalance,
+      amountDeducted: amount
+    });
+  } catch (error) {
+    console.error('Error deducting coins:', error);
+    res.status(500).json({ error: 'Failed to deduct coins' });
+  }
+});
+
+// Reset coins (admin/testing function)
+router.post('/coins/reset', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const initialBalance = 5000;
+
+    const user = await User.findOne({ userId });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    user.coins = initialBalance;
+    await user.save();
+
+    res.json({
+      success: true,
+      message: 'Coins reset successfully',
+      balance: initialBalance
+    });
+  } catch (error) {
+    console.error('Error resetting coins:', error);
+    res.status(500).json({ error: 'Failed to reset coins' });
+  }
+});
+
+// Daily coin claim
+router.post('/coins/daily-claim', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const user = await User.findOne({ userId });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const now = new Date();
+    const lastClaim = user.lastDailyClaimDate;
+
+    // Check if user has already claimed today
+    if (lastClaim) {
+      const lastClaimDate = new Date(lastClaim);
+      const timeDiff = now - lastClaimDate;
+      const hoursDiff = timeDiff / (1000 * 60 * 60);
+
+      // If claimed within last 24 hours
+      if (hoursDiff < 24) {
+        const hoursUntilNextClaim = Math.ceil(24 - hoursDiff);
+        return res.status(400).json({ 
+          error: 'Daily reward already claimed',
+          message: `Come back in ${hoursUntilNextClaim} hours for your next reward!`,
+          canClaim: false,
+          nextClaimTime: new Date(lastClaimDate.getTime() + 24 * 60 * 60 * 1000),
+          hoursRemaining: hoursUntilNextClaim
+        });
+      }
+    }
+
+    // Calculate streak
+    let streak = user.coinStats.dailyClaimsStreak || 0;
+    const daysDiff = lastClaim ? Math.floor((now - new Date(lastClaim)) / (1000 * 60 * 60 * 24)) : 999;
+
+    if (daysDiff === 1) {
+      // Consecutive day - increase streak
+      streak += 1;
+    } else if (daysDiff > 1) {
+      // Streak broken - reset
+      streak = 1;
+    } else {
+      // First claim
+      streak = 1;
+    }
+
+    // Calculate reward based on streak
+    const baseReward = 100;
+    const streakBonus = Math.min(streak - 1, 6) * 50; // Max 300 bonus at day 7
+    const totalReward = baseReward + streakBonus;
+
+    // Update user
+    user.coins += totalReward;
+    user.lastDailyClaimDate = now;
+    user.coinStats.dailyClaimsStreak = streak;
+    user.coinStats.totalDailyClaims = (user.coinStats.totalDailyClaims || 0) + 1;
+    
+    await user.save();
+
+    res.json({
+      success: true,
+      message: `🎁 Daily reward claimed! +${totalReward} coins`,
+      reward: {
+        baseReward,
+        streakBonus,
+        totalReward,
+        streak,
+        newBalance: user.coins
+      },
+      canClaim: false,
+      nextClaimTime: new Date(now.getTime() + 24 * 60 * 60 * 1000)
+    });
+  } catch (error) {
+    console.error('Error claiming daily reward:', error);
+    res.status(500).json({ error: 'Failed to claim daily reward' });
+  }
+});
+
+// Check if daily claim is available
+router.get('/coins/daily-claim/status', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const user = await User.findOne({ userId });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const now = new Date();
+    const lastClaim = user.lastDailyClaimDate;
+
+    if (!lastClaim) {
+      return res.json({
+        canClaim: true,
+        streak: 0,
+        nextReward: 100,
+        message: 'Claim your first daily reward!'
+      });
+    }
+
+    const lastClaimDate = new Date(lastClaim);
+    const timeDiff = now - lastClaimDate;
+    const hoursDiff = timeDiff / (1000 * 60 * 60);
+
+    if (hoursDiff >= 24) {
+      // Can claim
+      const daysDiff = Math.floor((now - lastClaimDate) / (1000 * 60 * 60 * 24));
+      let streak = user.coinStats.dailyClaimsStreak || 0;
+      
+      if (daysDiff === 1) {
+        streak += 1;
+      } else if (daysDiff > 1) {
+        streak = 1;
+      }
+
+      const baseReward = 100;
+      const streakBonus = Math.min(streak - 1, 6) * 50;
+      const nextReward = baseReward + streakBonus;
+
+      return res.json({
+        canClaim: true,
+        streak: user.coinStats.dailyClaimsStreak || 0,
+        nextStreak: streak,
+        nextReward,
+        message: 'Daily reward available!'
+      });
+    } else {
+      // Cannot claim yet
+      const hoursRemaining = Math.ceil(24 - hoursDiff);
+      return res.json({
+        canClaim: false,
+        streak: user.coinStats.dailyClaimsStreak || 0,
+        hoursRemaining,
+        nextClaimTime: new Date(lastClaimDate.getTime() + 24 * 60 * 60 * 1000),
+        message: `Come back in ${hoursRemaining} hours!`
+      });
+    }
+  } catch (error) {
+    console.error('Error checking daily claim status:', error);
+    res.status(500).json({ error: 'Failed to check claim status' });
+  }
+});
+
+// ==================== END COIN BETTING SYSTEM ====================
 
 // Get leaderboard
 router.get('/leaderboard', async (req, res) => {
