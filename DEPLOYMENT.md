@@ -124,11 +124,59 @@ curl -X POST https://your-vercel-url.vercel.app/api/users/login \
 
 ### 404 NOT_FOUND Error
 
-If you're getting a 404 error, ensure:
-1. ✅ `vercel.json` points to `api/index.js`
-2. ✅ The `api/index.js` file exists
-3. ✅ All environment variables are set in Vercel dashboard
-4. ✅ The deployment completed successfully
+If you're getting a 404 error at your Vercel URL, follow these steps:
+
+#### 1. Verify File Structure
+Ensure your project structure looks like this:
+```
+Tic-Tac-Toe-Server/
+├── api/
+│   └── index.js  ← This file must exist
+├── server/
+│   ├── config/
+│   ├── routes/
+│   └── ...
+├── vercel.json
+└── package.json
+```
+
+#### 2. Check Vercel Deployment Logs
+1. Go to your Vercel dashboard
+2. Navigate to your project
+3. Click on the latest deployment
+4. Check the "Build Logs" and "Function Logs" for errors
+
+Common errors:
+- `Cannot find module` - Check that all dependencies are in `package.json`
+- `Path resolution errors` - Verify relative paths in `api/index.js`
+- `Initialization errors` - Check MongoDB/Firebase configuration
+
+#### 3. Verify vercel.json Configuration
+Your `vercel.json` should be simple:
+```json
+{
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 60
+    }
+  }
+}
+```
+
+#### 4. Test the Function Directly
+Try accessing:
+- `https://your-app.vercel.app/api/test` (if test.js exists)
+- `https://your-app.vercel.app/` (should hit index.js)
+- `https://your-app.vercel.app/health` (health check)
+
+#### 5. Redeploy
+After making changes:
+1. Commit and push to your repository
+2. Vercel will auto-deploy
+3. Or manually redeploy from Vercel dashboard
+
+#### 6. Check Environment Variables
+Ensure all required environment variables are set in Vercel dashboard under Settings → Environment Variables
 
 ### Database Connection Issues
 
